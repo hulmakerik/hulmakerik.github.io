@@ -1,6 +1,6 @@
-function log(i, j, msg) {
-    console.log({"i": i, "j": j, "msg": msg});
-}
+// export function log(i, j, msg) {
+//     console.log({"i": i, "j": j, "msg": msg});
+// }
 
 
 function arange(n) {
@@ -26,4 +26,4 @@ function indices(dimensions) {
     return res;
 }
 
-export {log, arange, unsqueeze, indices};
+export {arange, unsqueeze, indices};

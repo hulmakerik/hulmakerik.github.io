@@ -1,260 +1,210 @@
-import {create} from './modules/canvas.js';
-import {rint, line} from './modules/render.js';
-import {W, H, M, C, G, FG} from './modules/config.js';
-import {indices, log} from './modules/utils.js';
-import {Icon, Number} from './modules/icon.js';
+import {FONT, W, H, M, C, G, FG, BG, PALETTE} from './modules/config.js';
+import {indices} from './modules/utils.js';
+import { Stone, SState, SType } from './modules/stone.js';
+import { Icon } from './modules/icon.js';
 
 
-const ICONS = {
-    flag: new Icon(C, String.fromCharCode(9873), 30, 'rgb(120,120,120)', 'rgb(200, 200, 200)'),
-    red_flag: new Icon(C, String.fromCharCode(9873), 30, 'rgb(167,0,0)', 'rgb(255, 82, 82)'),
-    mine: new Icon(C, String.fromCharCode(9965), 30, 'rgb(167,0,0)', 'rgb(255,82,82)'),
-    gray_mine: new Icon(C, String.fromCharCode(9965), 30, 'rgb(120,120,120)', 'rgb(200,200,200)'),
-    gray: new Icon(C, null, null, null, 'rgb(200,200,200)'),
-    hidden: new Icon(C, null, null, null, FG),
-    border: new Icon(C, "X", 30, 'rgb(167,0,0)', 'rgb(255, 82, 82)'),   // nothing
-    0: new Number(C, 0, 30, FG),
-}
+const FLAG = new Icon(String.fromCharCode(9873), ...PALETTE.correct);
+const RED_FLAG = new Icon(String.fromCharCode(9873), ...PALETTE.wrong);
+const MINE = new Icon(String.fromCharCode(9965), ...PALETTE.wrong);
+const GRAY_MINE = new Icon(String.fromCharCode(9965), ...PALETTE.correct);
+const GRAY = new Icon(null, ...PALETTE.correct);
+const HIDDEN = new Icon(null, null, FG);
 
-class Stone {
-    constructor(x, y, icon, solution) {
-        this.x = x;
-        this.y = y;
-        this.icon = icon;
-        this.solution = solution;
-        this.neighbors = [];
-    }
 
-    render(ctx, x, y) {
-        this.icon.render(ctx, x, y);
-    }
-
-    remainingMines() {
-        if (this.solution instanceof Number) {
-            let no_flags = this.neighbors.filter(n => n.icon == ICONS.flag).length;
-            return this.solution.value - no_flags;
-        }
-    }
+function xy2ij(x, y) {
+    let i = Math.floor(y / (C+G));
+    let j = Math.floor(x / (C+G));
+    return [i, j];
 }
 
 
-const GameState = {
-	new: "Click2Play",
-	running: "",
-	won: "WON!",
-	lost: "LOST"
+function ij2xy(i, j) {
+    let x = j * (C + G) + G/2;
+    let y = i * (G + C) + G/2;
+    return [x, y];
 }
 
 
 class Game {
-    constructor(shape, m) {
-        this.shape = shape
-        this.m = m;
+    constructor() {
+        this.board = Array(H).fill().map(() => Array(W).fill().map(() => new Stone));
 
-        this.board = Array(shape[0]).fill().map(() => Array(shape[1]));
-        for (let [i, j] of indices(shape))
-            this.board[i][j] = new Stone(ICONS.hidden, new Number(C, 0, 30, FG));
-
-        for (let [i0, j0] of indices(shape)) {
+        for (let [i0, j0] of indices([H, W])) {
             let neighbors = [];
-            for (let i = i0-1; i <= i0+1; i++) {
-                for (let j = j0-1; j <= j0+1; j++) {
-                    if (i == i0 && j == j0)
-                        continue;
-                    if (i < 0 || j < 0 || i == shape[0] || j == shape[1])
-                        neighbors.push(new Stone(ICONS.border, ICONS.border));
-                    else
-                        neighbors.push(this.board[i][j]);
-                }
+            for (let [k, l] of indices([3, 3])) {
+                let [i, j] = [i0-1+k, j0-1+l];
+                if (i == i0 && j == j0)
+                    continue;
+                if (i < 0 || j < 0 || i == H || j == W)
+                    neighbors.push(new Stone(SType.border, SState.revealed));
+                else
+                    neighbors.push(this.board[i][j]);
             }
-            this.board[i0][j0].neighbors = neighbors;
+            this.board[i0][j0].setNeighbors(neighbors);
         }
         this.reset();
+    }
+
+    setScore(score) {
+        this.score = score;
+        updateScoreboard(this.getScore());
+    }
+
+    getScore() {
+        let [flags, status, td] = this.score;
+        if (flags == null)
+            flags = this.board.flat().filter(s => s.state == SState.flagged).length;
+        if (status == null)
+            status = "";
+        if (td == null)
+            td = (this.tn || new Date()) - (this.t0 || new Date());
+        return [flags, status, td];
     }
 
     reset() {
-        this.board.flat().forEach(s => {
-            s.icon = ICONS.hidden;
-            s.solution = new Number(C, 0, 30, FG);
-        })
+        this.board.flat().forEach(s => s.reset());
+        this.stop();
         this.t0 = null; 
         this.tn = null;
-        this.state = GameState.new;
+        this.setScore([null, "Click to play", 0]);
     }
 
-    action1(stone) {
-        if (this.state == GameState.new)
-            this.generateSolution(stone);
-
-        if (this.running()) {
-            if (stone.icon == ICONS.hidden || stone.icon instanceof Number) {
-                this.uncover_bfs(stone);
-            }
-            this.checkResult();
-        }
-    }
-
-    action2(stone) {
-        if (this.running()) {
-            if (stone.icon == ICONS.hidden)
-                stone.icon = ICONS.flag;
-            else if (stone.icon == ICONS.flag)
-                stone.icon = ICONS.hidden;
-        }
-    }
-
-    generateSolution(stone) {
+    start(s0) {
         this.reset();
         this.t0 = new Date();
-        this.state = GameState.running;
-
-        for (let l = 0; l < this.m; l++) {
-            let s = this.board[rint(0, this.shape[0])][rint(0, this.shape[1])];
-            while (s.solution == ICONS.mine || stone.neighbors.includes(s) || stone == s)
-                s = this.board[rint(0, this.shape[0])][rint(0, this.shape[1])];
-            s.solution = ICONS.mine;
-            s.neighbors.filter(n => n.solution instanceof Number).forEach(n => n.solution.inc());
-        }
+        this.scatterMines(s0);
+        this.setScore([null, "GO!", null]);
     }
 
-    uncover_bfs(stone) {
-        let queue = [stone];
-        if (stone.solution instanceof Number && stone.remainingMines() <= 0)
-            queue = queue.concat(stone.neighbors.filter(n => n.icon == ICONS.hidden));
-
-        while (queue.length > 0) {
-            let s = queue.shift();
-            if (s.icon == ICONS.hidden) {
-                s.icon = s.solution;
-                if (s.icon instanceof Number && s.remainingMines() <= 0)
-                    queue = queue.concat(s.neighbors.filter(n => n.icon == ICONS.hidden));
-            }
-        }
+    stop(result) {
+        this.tn = new Date();
+        this.setScore([null, result, this.tn-this.t0]);
     }
 
-    over(result) {
-        if (this.running()) {
-            this.tn = new Date();
-            this.state = result;
+    click(stone) {
+        if (this.t0 == null)
+            this.start(stone);
 
-            // remap board
-            for (let s of this.board.flat()) {
-                if (s.icon == ICONS.hidden && s.solution instanceof Number)
-                    s.icon = ICONS.gray;
-                else if (s.icon == ICONS.hidden && s.solution == ICONS.mine)
-                    s.icon = ICONS.gray_mine;
-                else if (s.icon == ICONS.flag && s.solution instanceof Number)
-                    s.icon = ICONS.red_flag;
-            }
-        }
-        return result;
+        if (this.tn == null) {
+            stone.reveal(true);
+            this.checkResult();
+        } else
+            this.reset();
     }
 
-    running() { return this.state == GameState.running || this.state == GameState.new; }
+    tag(stone) {
+        if (this.t0 == null)
+            this.start(stone)
+        if (this.tn == null)
+            stone.toggleFlag();
+        else
+            this.reset();
+    }
+
+    scatterMines(s0) {
+        let remaining = M;
+        while (remaining > 0) {
+            let s = this.board.flat()[Math.floor(Math.random()*W*H)];
+            if (!s0.neigh.includes(s) && s0 != s)
+                remaining -= s.landMine();
+        }
+    }
 
     checkResult() {
-        if (this.state != GameState.running)
-            return this.state;
+        // revealed mine exists
+        if (this.board.flat().filter(s => s.state == SState.revealed && s.type == SType.mine).length > 0)
+            this.stop("LOST")
 
-        if (this.board.flat().map(s => s.icon).includes(ICONS.mine))
-            return this.over(GameState.lost);
-
-        // numeric indices
+        // hidden/flagged free exists
         for (let s of this.board.flat()) {
-            if (s.solution instanceof Number && s.icon != s.solution)
-                return this.state; //running
+            if (s.state != SState.revealed && s.type == SType.free)
+                return; //running
         }
-        return this.over(GameState.won);
+        this.stop("WON!");
+    }
+
+    render(ctx) {
+        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        for (let [i, j] of indices([H, W])) {
+            let [x, y] = ij2xy(i, j);
+            let s = this.board[i][j];
+            let icon = null;
+
+            if (s.state == SState.hidden)
+                icon = HIDDEN;
+            else if (s.state == SState.flagged)
+                icon = FLAG;
+            else if (s.state == SState.revealed)
+                if (s.type == SType.free)
+                    icon = new Icon(s.danger || null, ...PALETTE.default);
+                else
+                    icon = MINE;
+
+            if (this.tn) {
+                if (icon == FLAG && s.type == SType.free)
+                    icon = RED_FLAG;
+                else if (icon == HIDDEN)
+                    icon = s.type == SType.mine ? GRAY_MINE: GRAY;
+            }
+            icon.render(ctx, x, y, C);
+        }
+        updateScoreboard(this.getScore());
     }
 }
 
-class UI {
-    constructor(ctx, game, C, G, FG) {
-        this.ctx = ctx;
-        this.game = game;
-        this.C = C;
-        this.G = G;
-        this.FG = FG;
-    }
-
-    updateScoreboard() {
-        let [x, y, xx, yy] = [0, this.game.shape[0], this.game.shape[1], (this.game.shape[0]+0.7)].map(x => x*(this.C+this.G));
-        this.ctx.clearRect(x, y, xx, yy);
-        this.ctx.fillStyle = this.FG;
-        this.ctx.font = "20px Helvetica";
-        this.ctx.textBaseline = "bottom";
-
-        // remaining mines
-        
-        let no_flags = this.game.board.flat().filter(s => s.icon == ICONS.flag).length;
-        let msg = `${ICONS.mine.text} ${this.game.m - no_flags}`;
-        this.ctx.textAlign = "left";
-        this.ctx.fillText(msg, this.G*2, yy);
-
-        // status
-        this.ctx.textAlign = "center";
-        this.ctx.fillText(this.game.state, (x+xx)/2, yy);
-
-        // time
-        let time = 0;
-        if (this.game.state == GameState.running)
-            time = Math.floor(Math.abs((new Date() - this.game.t0) / 1000));
-        else
-            time = Math.floor(Math.abs((this.game.tn - this.game.t0) / 1000));
-        this.ctx.textAlign = "right";
-        this.ctx.fillText(`${time} s`, xx-this.G*2, yy);
-
-    }
-
-    xy2ij(x, y) {
-        let i = Math.floor(y / (this.C+this.G));
-        let j = Math.floor(x / (this.C+this.G));
-        return [i, j];
-    }
-
-    ij2xy(i, j) {
-        let x = j * (this.C + this.G) + this.G/2;
-        let y = i * (this.G + this.C) + this.G/2;
-        return [x, y];
-    }
-
-    render() {
-        for (let [i, j] of indices(this.game.shape)) {
-            let [x, y] = this.ij2xy(i, j);
-            this.game.board[i][j].render(this.ctx, x, y);
-        }
-        // this.grid();
-        this.updateScoreboard();
-    }
+function updateScoreboard(score) {
+    let scoreboard = document.getElementById('scoreboard');
+    let [flags, status, td] = score;
+    scoreboard.children[0].textContent = `${MINE.text} ${M - flags}`;
+    scoreboard.children[1].textContent = status;
+    scoreboard.children[2].textContent = `${Math.floor(Math.abs(td) / 1000)} s`;
 }
 
-let ctx = create('myCanvas', document.body, W*(C+G), (H+1)*(C+G));
-ctx.fillStyle = FG;
+// 8<---8<---8<---8<---8<---8<---8<---8<---8<---8<---8<---8<---8<---8<---8<---8<---8<---8<---8<---8<---8<---8<---8<---8<---8<
 
-let game = new Game([H, W], M);
-let ui = new UI(ctx, game, C, G, FG);
-const intervalID = window.setInterval(function() {ui.updateScoreboard()}, 1000);
+document.body.style = `background-color: ${BG}; font-family: ${FONT}; color: ${FG}; font-size:20px;`;
 
-ui.render();
+let canvas = document.body.appendChild(document.createElement('div')).appendChild(document.createElement('canvas'));
+canvas.width = W*(C+G);
+canvas.height = H*(C+G);
+let ctx = canvas.getContext('2d');
+ctx.font = `30px ${FONT}`;
+ctx.textAlign = "center";
+ctx.textBaseline = "middle";
+
+
+let scoreboard = document.body.appendChild(document.createElement("div"));
+scoreboard.id = "scoreboard";
+// scoreboard.setAttribute("style", `font-family:${FONT}; font-size:20px; color:${FG}; width: ${canvas.width}px; display: grid; grid-template-columns: 33% 33% auto`);
+scoreboard.setAttribute("style", `width: ${canvas.width}px; display: grid; grid-template-columns: 33% 33% auto; float: left;`);
+
+for (let align of ['left', 'center', 'right'])  {
+    let item = scoreboard.appendChild(document.createElement("div"));
+    item.style = `text-align: ${align};`;
+};
+
+let game = new Game();
+
+// periodic update with these defaule
+let intervalID = window.setInterval(() => {
+    updateScoreboard(game.getScore());
+}, 1000);
+
+game.render(ctx);
 
 // document.body.onclick = click;
 document.addEventListener("click", function(ev) {
-    let [i0, j0] = ui.xy2ij(ev.clientX, ev.clientY);
-    game.action1(game.board[i0][j0]);
-    ui.render();
+    let [i0, j0] = xy2ij(ev.clientX, ev.clientY);
+    game.click(game.board[i0][j0]);
+    game.render(ctx);
 });
 
 document.addEventListener('contextmenu', function(ev) {
     ev.preventDefault();
-    let [i0, j0] = ui.xy2ij(ev.pageX, ev.pageY);
-    game.action2(game.board[i0][j0]);
-    ui.render();
+    let [i0, j0] = xy2ij(ev.pageX, ev.pageY);
+    game.tag(game.board[i0][j0]);
+    game.render(ctx);
 });
 
-/*
-TODO: bylo by fajn, aby stones vedely, kde jsou (lokace, xy) -> ui je soucastni game?
-TODO: grid -> cisla se mohou vykreslovat nasledovne: 
-        - cisla jsou vedle sebe -> carka uprostred
-        - vedle cisla je ikona -> carka uvnitr cisla
-TODO: grid lepsi -> carka je vzdycky uprostrd, ale nevykresli se, pokud sousedi ikona s ikonou, nebo stone s border
-*/
+// 300 lines
